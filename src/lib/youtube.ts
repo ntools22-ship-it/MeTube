@@ -1,82 +1,93 @@
 /**
- * MeTube — YouTube via Vercel API Proxy
- * الطلبات بتمشي: Browser → Vercel API → Invidious → YouTube
- * بكده بنتجاوز CORS تماماً
+ * Vercel Serverless Function — /api/search?q=query
+ * يسكرب YouTube مباشرة بدون API key وبدون Invidious
  */
 
-export interface VideoResult {
-  videoId: string;
-  title: string;
-  author: string;
-  lengthSeconds: number;
-  viewCount: number;
-  thumbnail: string;
-}
+export default async function handler(req, res) {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+  res.setHeader("Cache-Control", "s-maxage=300");
 
-/**
- * بحث YouTube — عبر Vercel proxy
- */
-export async function searchYouTube(query: string): Promise<VideoResult[]> {
-  const res = await fetch(`/api/search?q=${encodeURIComponent(query)}`);
+  if (req.method === "OPTIONS") return res.status(200).end();
 
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error((err as any).error || "فشل البحث، حاول مرة أخرى");
+  const { q } = req.query;
+  if (!q) return res.status(400).json({ error: "q required" });
+
+  try {
+    // YouTube search page scraping
+    const searchUrl = `https://www.youtube.com/results?search_query=${encodeURIComponent(q)}&hl=en`;
+    
+    const response = await fetch(searchUrl, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept": "text/html,application/xhtml+xml",
+      },
+      signal: AbortSignal.timeout(10000),
+    });
+
+    if (!response.ok) throw new Error(`YouTube responded ${response.status}`);
+
+    const html = await response.text();
+
+    // Extract ytInitialData JSON from the page
+    const match = html.match(/var ytInitialData = ({.+?});<\/script>/s) ||
+                  html.match(/ytInitialData\s*=\s*({.+?});\s*(?:\/\/|<\/script>)/s);
+
+    if (!match) throw new Error("Could not parse YouTube response");
+
+    const data = JSON.parse(match[1]);
+
+    // Navigate to video results
+    const contents =
+      data?.contents?.twoColumnSearchResultsRenderer?.primaryContents
+        ?.sectionListRenderer?.contents?.[0]?.itemSectionRenderer?.contents || [];
+
+    const results = [];
+
+    for (const item of contents) {
+      const v = item?.videoRenderer;
+      if (!v?.videoId) continue;
+
+      const title = v.title?.runs?.[0]?.text || v.title?.simpleText || "";
+      const author = v.ownerText?.runs?.[0]?.text || v.shortBylineText?.runs?.[0]?.text || "";
+      const duration = v.lengthText?.simpleText || "0:00";
+      const viewText = v.viewCountText?.simpleText || v.shortViewCountText?.simpleText || "0";
+      const thumbnail = `https://i.ytimg.com/vi/${v.videoId}/mqdefault.jpg`;
+
+      results.push({
+        videoId: v.videoId,
+        title,
+        author,
+        lengthSeconds: parseDuration(duration),
+        viewCount: parseViews(viewText),
+        thumbnail,
+      });
+
+      if (results.length >= 20) break;
+    }
+
+    return res.status(200).json(results);
+
+  } catch (err) {
+    console.error("Search error:", err.message);
+    return res.status(500).json({ error: "فشل البحث: " + err.message });
   }
-
-  const data = await res.json();
-
-  return (data as any[])
-    .filter((item) => item.videoId)
-    .slice(0, 20)
-    .map((item) => ({
-      videoId: item.videoId,
-      title: item.title || "بدون عنوان",
-      author: item.author || "غير معروف",
-      lengthSeconds: item.lengthSeconds || 0,
-      viewCount: item.viewCount || 0,
-      thumbnail: getBestThumbnail(item.videoThumbnails, item.videoId),
-    }));
 }
 
-function getBestThumbnail(thumbnails: any[] | undefined, videoId: string): string {
-  if (thumbnails?.length) {
-    const medium = thumbnails.find((t) => t.quality === "medium" || t.quality === "mq");
-    const url = (medium || thumbnails[0])?.url || "";
-    if (url) return url;
-  }
-  return `https://i.ytimg.com/vi/${videoId}/mqdefault.jpg`;
+function parseDuration(str) {
+  if (!str) return 0;
+  const parts = str.split(":").map(Number);
+  if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+  if (parts.length === 2) return parts[0] * 60 + parts[1];
+  return 0;
 }
 
-/**
- * رابط الصوت — عبر Vercel proxy
- */
-export async function getAudioStreamUrl(videoId: string, dataSaver = false): Promise<string> {
-  const itag = dataSaver ? 139 : 140;
-  const res = await fetch(`/api/stream?id=${videoId}&itag=${itag}`);
-
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error((err as any).error || "تعذّر تحميل الصوت");
-  }
-
-  const data = await res.json();
-  return data.url;
-}
-
-/** "3:45" */
-export function formatDuration(seconds: number): string {
-  if (!seconds) return "0:00";
-  const h = Math.floor(seconds / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
-  const s = Math.floor(seconds % 60);
-  if (h > 0) return `${h}:${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
-  return `${m}:${s.toString().padStart(2, "0")}`;
-}
-
-/** "1.2M" */
-export function formatViews(views: number): string {
-  if (views >= 1_000_000) return `${(views / 1_000_000).toFixed(1)}M`;
-  if (views >= 1_000) return `${(views / 1_000).toFixed(1)}K`;
-  return views.toString();
+function parseViews(str) {
+  if (!str) return 0;
+  const n = str.replace(/[^0-9KMB.]/gi, "");
+  if (n.includes("B")) return parseFloat(n) * 1_000_000_000;
+  if (n.includes("M")) return parseFloat(n) * 1_000_000;
+  if (n.includes("K")) return parseFloat(n) * 1_000;
+  return parseInt(n) || 0;
 }
