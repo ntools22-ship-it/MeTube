@@ -1,57 +1,38 @@
-/**
- * Vercel API Route — /api/search?q=query
- * Proxy لـ Invidious بيتجاوز CORS
- * بيشتغل على سيرفر Vercel مش في المتصفح
- */
-
-const INSTANCES = [
-  "https://inv.nadeko.net",
-  "https://invidious.nerdvpn.de",
-  "https://yt.artemislena.eu",
-  "https://invidious.privacydev.net",
-  "https://iv.datura.network",
-  "https://invidious.protokolla.fi",
-];
-
 export default async function handler(req, res) {
-  // CORS headers — السماح للـ frontend بالوصول
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
-  res.setHeader("Cache-Control", "s-maxage=300"); // cache 5 دقايق
-
-  if (req.method === "OPTIONS") return res.status(200).end();
-
   const { q } = req.query;
-  if (!q) return res.status(400).json({ error: "q parameter required" });
+  if (!q) return res.status(400).json({ error: "Query required" });
 
-  const path = `/api/v1/search?q=${encodeURIComponent(q)}&type=video&fields=videoId,title,author,lengthSeconds,viewCount,videoThumbnails`;
+  try {
+    const url = `https://www.youtube.com/results?search_query=${encodeURIComponent(q)}`;
+    const response = await fetch(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+        "Accept-Language": "ar,en-US;q=0.9,en;q=0.8"
+      }
+    });
 
-  for (const instance of INSTANCES) {
-    try {
-      const response = await fetch(`${instance}${path}`, {
-        headers: { "User-Agent": "Mozilla/5.0 MeTube/2.0" },
-        signal: AbortSignal.timeout(7000),
-      });
+    const html = await response.text();
+    const jsonText = html.split('var ytInitialData = ')[1].split(';</script>')[0];
+    const data = JSON.parse(jsonText);
+    const contents = data.contents.twoColumnSearchResultsRenderer.primaryContents.sectionListRenderer.contents[0].itemSectionRenderer.contents;
 
-      if (!response.ok) continue;
+    const results = contents.map(item => {
+      if (item.videoRenderer) {
+        const v = item.videoRenderer;
+        return {
+          type: 'video',
+          videoId: v.videoId,
+          title: v.title.runs[0].text,
+          author: v.ownerText?.runs[0]?.text || "Unknown",
+          thumbnail: v.thumbnail.thumbnails[0].url
+        };
+      }
+      return null;
+    }).filter(Boolean);
 
-      const data = await response.json();
-
-      // Fix relative thumbnail URLs
-      const fixed = data.map((item) => ({
-        ...item,
-        videoThumbnails: (item.videoThumbnails || []).map((t) => ({
-          ...t,
-          url: t.url?.startsWith("/") ? `${instance}${t.url}` : t.url,
-        })),
-        _instance: instance,
-      }));
-
-      return res.status(200).json(fixed);
-    } catch {
-      continue;
-    }
+    return res.status(200).json(results);
+  } catch (error) {
+    return res.status(500).json({ error: "Search failed" });
   }
-
-  return res.status(503).json({ error: "جميع خوادم Invidious غير متاحة حالياً" });
 }
