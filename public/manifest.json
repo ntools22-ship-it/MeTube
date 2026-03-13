@@ -1,0 +1,41 @@
+{
+  "name": "MeTube - مشغّل الموسيقى الذكي",
+  "short_name": "MeTube",
+  "description": "مشغّل موسيقى مدعوم بالذكاء الاصطناعي — بحث يوتيوب، نسخ صوتي، ترجمة عربية، مشاركة مباشرة",
+  "start_url": "/",
+  "display": "standalone",
+  "display_override": ["window-controls-overlay", "standalone"],
+  "background_color": "#121212",
+  "theme_color": "#22c55e",
+  "orientation": "any",
+  "lang": "ar",
+  "dir": "rtl",
+  "categories": ["music", "entertainment", "productivity"],
+  "icons": [
+    {
+      "src": "/favicon.ico",
+      "sizes": "64x64",
+      "type": "image/x-icon"
+    }
+  ],
+  "screenshots": [],
+  "shortcuts": [
+    {
+      "name": "البحث",
+      "url": "/search",
+      "description": "ابحث في YouTube"
+    },
+    {
+      "name": "أدوات الذكاء الاصطناعي",
+      "url": "/ai-tools",
+      "description": "نسخ وترجمة"
+    }
+  ],
+  "share_target": {
+    "action": "/search",
+    "method": "GET",
+    "params": {
+      "text": "q"
+    }
+  }
+}
