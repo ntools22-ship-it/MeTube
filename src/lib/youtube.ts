@@ -1,3 +1,8 @@
+/**
+ * MeTube — YouTube Data API v3
+ * + pagination كاملة للـ playlists
+ */
+
 const API_KEY = import.meta.env.VITE_YOUTUBE_API_KEY;
 const BASE = "https://www.googleapis.com/youtube/v3";
 
@@ -9,6 +14,7 @@ export interface VideoResult {
   lengthSeconds: number;
   viewCount: number;
   thumbnail: string;
+  description?: string;
 }
 export interface PlaylistResult {
   type: "playlist";
@@ -27,26 +33,38 @@ export interface ChannelResult {
 }
 export type SearchResult = VideoResult | PlaylistResult | ChannelResult;
 
+// ── بحث عام ───────────────────────────────────────────────────────────────────
 export async function searchYouTube(query: string): Promise<SearchResult[]> {
-  const res = await fetch(`${BASE}/search?part=snippet&q=${encodeURIComponent(query)}&maxResults=25&key=${API_KEY}`);
+  const res = await fetch(
+    `${BASE}/search?part=snippet&q=${encodeURIComponent(query)}&maxResults=25&key=${API_KEY}`
+  );
   if (!res.ok) throw new Error("فشل البحث — تحقق من الـ API Key");
   const data = await res.json();
   if (!data.items?.length) return [];
 
-  const videoIds = data.items.filter((i: any) => i.id.kind === "youtube#video").map((i: any) => i.id.videoId).join(",");
-  let videoDetails: Record<string, any> = {};
+  const videoIds = data.items
+    .filter((i: any) => i.id.kind === "youtube#video")
+    .map((i: any) => i.id.videoId).join(",");
+
+  let details: Record<string, any> = {};
   if (videoIds) {
-    const dRes = await fetch(`${BASE}/videos?part=contentDetails,statistics&id=${videoIds}&key=${API_KEY}`);
-    const dData = await dRes.json();
-    dData.items?.forEach((i: any) => { videoDetails[i.id] = i; });
+    const d = await fetch(`${BASE}/videos?part=contentDetails,statistics,snippet&id=${videoIds}&key=${API_KEY}`);
+    const dd = await d.json();
+    dd.items?.forEach((i: any) => { details[i.id] = i; });
   }
 
   return data.items.map((item: any): SearchResult => {
     const s = item.snippet;
-    const thumb = s.thumbnails?.medium?.url || s.thumbnails?.default?.url || "";
+    const thumb = s.thumbnails?.medium?.url || "";
     if (item.id.kind === "youtube#video") {
-      const d = videoDetails[item.id.videoId];
-      return { type: "video", videoId: item.id.videoId, title: s.title, author: s.channelTitle, thumbnail: thumb, lengthSeconds: parseDuration(d?.contentDetails?.duration || "PT0S"), viewCount: parseInt(d?.statistics?.viewCount || "0") };
+      const d = details[item.id.videoId];
+      return {
+        type: "video", videoId: item.id.videoId, title: s.title,
+        author: s.channelTitle, thumbnail: thumb,
+        lengthSeconds: parseDuration(d?.contentDetails?.duration || "PT0S"),
+        viewCount: parseInt(d?.statistics?.viewCount || "0"),
+        description: d?.snippet?.description || s.description || "",
+      };
     }
     if (item.id.kind === "youtube#playlist") {
       return { type: "playlist", playlistId: item.id.playlistId, title: s.title, channelTitle: s.channelTitle, thumbnail: thumb, itemCount: 0 };
@@ -55,57 +73,86 @@ export async function searchYouTube(query: string): Promise<SearchResult[]> {
   });
 }
 
-// فيديوهات قائمة تشغيل
+// ── playlist كاملة مع pagination ──────────────────────────────────────────────
 export async function getPlaylistVideos(playlistId: string): Promise<VideoResult[]> {
-  const res = await fetch(`${BASE}/playlistItems?part=snippet&playlistId=${playlistId}&maxResults=30&key=${API_KEY}`);
-  const data = await res.json();
-  if (!data.items?.length) return [];
-  const ids = data.items.map((i: any) => i.snippet.resourceId.videoId).filter(Boolean).join(",");
+  const all: any[] = [];
+  let pageToken = "";
+
+  // جيب كل الصفحات (50 في كل مرة)
+  do {
+    const url = `${BASE}/playlistItems?part=snippet&playlistId=${playlistId}&maxResults=50&key=${API_KEY}${pageToken ? `&pageToken=${pageToken}` : ""}`;
+    const res = await fetch(url);
+    const data = await res.json();
+    all.push(...(data.items || []));
+    pageToken = data.nextPageToken || "";
+  } while (pageToken);
+
+  const ids = all.map(i => i.snippet?.resourceId?.videoId).filter(Boolean);
+  if (!ids.length) return [];
+
+  // جيب التفاصيل على دفعات (100 كحد أقصى لكل request)
   let details: Record<string, any> = {};
-  if (ids) {
-    const dRes = await fetch(`${BASE}/videos?part=contentDetails,statistics&id=${ids}&key=${API_KEY}`);
-    const dData = await dRes.json();
-    dData.items?.forEach((i: any) => { details[i.id] = i; });
+  for (let i = 0; i < ids.length; i += 50) {
+    const chunk = ids.slice(i, i + 50).join(",");
+    const d = await fetch(`${BASE}/videos?part=contentDetails,statistics&id=${chunk}&key=${API_KEY}`);
+    const dd = await d.json();
+    dd.items?.forEach((v: any) => { details[v.id] = v; });
   }
-  return data.items
-    .filter((i: any) => i.snippet.resourceId.videoId)
-    .map((item: any): VideoResult => {
+
+  return all
+    .filter(i => i.snippet?.resourceId?.videoId)
+    .map((item): VideoResult => {
       const s = item.snippet;
       const vid = s.resourceId.videoId;
       const d = details[vid];
-      return { type: "video", videoId: vid, title: s.title, author: s.channelTitle || s.videoOwnerChannelTitle || "", thumbnail: s.thumbnails?.medium?.url || `https://i.ytimg.com/vi/${vid}/mqdefault.jpg`, lengthSeconds: parseDuration(d?.contentDetails?.duration || "PT0S"), viewCount: parseInt(d?.statistics?.viewCount || "0") };
+      return {
+        type: "video", videoId: vid, title: s.title,
+        author: s.videoOwnerChannelTitle || s.channelTitle || "",
+        thumbnail: s.thumbnails?.medium?.url || `https://i.ytimg.com/vi/${vid}/mqdefault.jpg`,
+        lengthSeconds: parseDuration(d?.contentDetails?.duration || "PT0S"),
+        viewCount: parseInt(d?.statistics?.viewCount || "0"),
+      };
     });
 }
 
-// فيديوهات وقوائم القناة
+// ── محتوى القناة ──────────────────────────────────────────────────────────────
 export async function getChannelContent(channelId: string): Promise<SearchResult[]> {
-  const [videosRes, playlistsRes] = await Promise.all([
-    fetch(`${BASE}/search?part=snippet&channelId=${channelId}&type=video&maxResults=20&order=date&key=${API_KEY}`),
-    fetch(`${BASE}/playlists?part=snippet,contentDetails&channelId=${channelId}&maxResults=10&key=${API_KEY}`),
+  const [vRes, pRes] = await Promise.all([
+    fetch(`${BASE}/search?part=snippet&channelId=${channelId}&type=video&maxResults=25&order=date&key=${API_KEY}`),
+    fetch(`${BASE}/playlists?part=snippet,contentDetails&channelId=${channelId}&maxResults=15&key=${API_KEY}`),
   ]);
-  const videosData = await videosRes.json();
-  const playlistsData = await playlistsRes.json();
+  const [vData, pData] = await Promise.all([vRes.json(), pRes.json()]);
 
-  const ids = videosData.items?.map((i: any) => i.id.videoId).filter(Boolean).join(",") || "";
+  const ids = (vData.items || []).map((i: any) => i.id.videoId).filter(Boolean).join(",");
   let details: Record<string, any> = {};
   if (ids) {
-    const dRes = await fetch(`${BASE}/videos?part=contentDetails,statistics&id=${ids}&key=${API_KEY}`);
-    const dData = await dRes.json();
-    dData.items?.forEach((i: any) => { details[i.id] = i; });
+    const d = await fetch(`${BASE}/videos?part=contentDetails,statistics&id=${ids}&key=${API_KEY}`);
+    const dd = await d.json();
+    dd.items?.forEach((i: any) => { details[i.id] = i; });
   }
 
-  const videos: VideoResult[] = (videosData.items || []).map((item: any): VideoResult => {
+  const videos: VideoResult[] = (vData.items || []).map((item: any): VideoResult => {
     const d = details[item.id.videoId];
     return { type: "video", videoId: item.id.videoId, title: item.snippet.title, author: item.snippet.channelTitle, thumbnail: item.snippet.thumbnails?.medium?.url || "", lengthSeconds: parseDuration(d?.contentDetails?.duration || "PT0S"), viewCount: parseInt(d?.statistics?.viewCount || "0") };
   });
 
-  const playlists: PlaylistResult[] = (playlistsData.items || []).map((item: any): PlaylistResult => ({
+  const playlists: PlaylistResult[] = (pData.items || []).map((item: any): PlaylistResult => ({
     type: "playlist", playlistId: item.id, title: item.snippet.title, channelTitle: item.snippet.channelTitle, thumbnail: item.snippet.thumbnails?.medium?.url || "", itemCount: item.contentDetails?.itemCount || 0,
   }));
 
   return [...playlists, ...videos];
 }
 
+// ── جيب تفاصيل فيديو واحد (للـ AI tools) ────────────────────────────────────
+export async function getVideoDetails(videoId: string): Promise<{ title: string; description: string; channelTitle: string } | null> {
+  const res = await fetch(`${BASE}/videos?part=snippet&id=${videoId}&key=${API_KEY}`);
+  const data = await res.json();
+  const item = data.items?.[0];
+  if (!item) return null;
+  return { title: item.snippet.title, description: item.snippet.description || "", channelTitle: item.snippet.channelTitle };
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────────────
 function parseDuration(iso: string): number {
   const m = iso.match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/);
   if (!m) return 0;
